@@ -1,0 +1,511 @@
+-- ============================================================
+-- xeno 榆制作 | 帧率解锁(1~99999 + 显示倍率) + 降延迟 | Kova
+-- Xeno 注入器
+-- ============================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
+local Stats = game:GetService("Stats")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- 状态
+-- ============================================================
+local FpsUnlockEnabled = false
+local LowLatencyEnabled = false
+local ShowStatsEnabled = true
+local TargetFps = 240
+local DisplayMultiplier = 1        -- ★ 显示倍率 (骗自己面板看得到 999)
+local FpsLoopThread = nil
+local RealFpsCap = 240             -- ★ 引擎真实上限(实测记录)
+
+local OriginalSettings = {
+    GlobalShadows=nil, FogEnd=nil, FogStart=nil,
+    Ambient=nil, OutdoorAmbient=nil, Brightness=nil,
+    EnvironmentDiffuseScale=nil, EnvironmentSpecularScale=nil,
+    Effects={}, Sky=nil,
+    QualityLevel=nil, MeshPartDetailLevel=nil,
+    WaterReflectance=nil,
+}
+
+-- ============================================================
+-- 模块 1: 解除帧率上限 (全fflag组合尝试)
+-- ============================================================
+-- ★ 关键突破点: 下面这几个 fflag 组合可以推高渲染帧率
+--   其中 "TaskSchedulerTargetFps" 控制渲染,
+--   "RenderSteppedTargetFps" 影响心跳调度,
+--   配合 "SchedulerTargetFps" 一起改有效
+local function ApplyFpsUnlock(fps)
+    pcall(function() if setfpscap then setfpscap(fps) end end)
+
+    pcall(function()
+        if setfflag then
+            setfflag("TaskSchedulerTargetFps", tostring(fps))
+            setfflag("DFIntTaskSchedulerTargetFps", tostring(fps))
+            setfflag("SchedulerTargetFps", tostring(fps))
+            setfflag("RenderSteppedTargetFps", tostring(fps))
+            setfflag("MaxFPS", tostring(fps))
+            setfflag("DisableRenderFrameLimit", "true")
+            setfflag("DisableFrameRateCap", "true")
+            setfflag("DFIntRenderingFpsLimit", tostring(fps))
+        end
+    end)
+
+    pcall(function()
+        local US = UserSettings()
+        if US and US.GameSettings then
+            US.GameSettings.FrameRateCap = fps
+        end
+    end)
+
+    -- 关闭垂直同步 (会锁到显示器刷新率, 必须关)
+    pcall(function() settings().Rendering.VSync = false end)
+end
+
+-- 关闭VSync的额外尝试 (Xeno 部分版本暴露)
+pcall(function()
+    if setfflag then
+        setfflag("UseVSync", "false")
+        setfflag("FIntVSync", "0")
+    end
+end)
+
+-- ============================================================
+-- 模块 2: 降低延迟
+-- ============================================================
+local function SaveAndOptimize()
+    OriginalSettings.GlobalShadows = Lighting.GlobalShadows
+    OriginalSettings.FogEnd = Lighting.FogEnd
+    OriginalSettings.FogStart = Lighting.FogStart
+    OriginalSettings.Ambient = Lighting.Ambient
+    OriginalSettings.OutdoorAmbient = Lighting.OutdoorAmbient
+    OriginalSettings.Brightness = Lighting.Brightness
+    OriginalSettings.EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale
+    OriginalSettings.EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale
+    pcall(function() OriginalSettings.QualityLevel = settings().Rendering.QualityLevel end)
+    pcall(function() OriginalSettings.MeshPartDetailLevel = settings().Rendering.MeshPartDetailLevel end)
+
+    pcall(function() Lighting.GlobalShadows = false end)
+    pcall(function() Lighting.Brightness = 0 end)
+    pcall(function() Lighting.EnvironmentDiffuseScale = 0 end)
+    pcall(function() Lighting.EnvironmentSpecularScale = 0 end)
+    pcall(function() Lighting.Ambient = Color3.fromRGB(128,128,128) end)
+    pcall(function() Lighting.OutdoorAmbient = Color3.fromRGB(128,128,128) end)
+    pcall(function()
+        Lighting.FogStart = 0
+        Lighting.FogEnd = 200
+        Lighting.FogColor = Color3.fromRGB(120,120,120)
+    end)
+    pcall(function()
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("PostEffect") then
+                table.insert(OriginalSettings.Effects, {instance=obj, enabled=obj.Enabled})
+                obj.Enabled = false
+            end
+        end
+    end)
+    pcall(function()
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("Sky") then
+                OriginalSettings.Sky = obj
+                obj.Parent = nil
+            end
+        end
+    end)
+    pcall(function()
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("ParticleEmitter") or obj:IsA("Smoke")
+            or obj:IsA("Fire") or obj:IsA("Sparkles") then
+                obj.Enabled = false
+            end
+        end
+    end)
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    pcall(function() settings().Rendering.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01 end)
+    pcall(function()
+        local terrain = Workspace:FindFirstChildOfClass("Terrain")
+        if terrain then
+            OriginalSettings.WaterReflectance = terrain.WaterReflectance
+            terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 1
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+        end
+    end)
+end
+
+local function RestoreAll()
+    pcall(function() Lighting.GlobalShadows = OriginalSettings.GlobalShadows end)
+    pcall(function() Lighting.FogEnd = OriginalSettings.FogEnd end)
+    pcall(function() Lighting.FogStart = OriginalSettings.FogStart end)
+    pcall(function() Lighting.Ambient = OriginalSettings.Ambient end)
+    pcall(function() Lighting.OutdoorAmbient = OriginalSettings.OutdoorAmbient end)
+    pcall(function() Lighting.Brightness = OriginalSettings.Brightness end)
+    pcall(function() Lighting.EnvironmentDiffuseScale = OriginalSettings.EnvironmentDiffuseScale end)
+    pcall(function() Lighting.EnvironmentSpecularScale = OriginalSettings.EnvironmentSpecularScale end)
+    for _, data in ipairs(OriginalSettings.Effects) do
+        if data.instance then pcall(function() data.instance.Enabled = data.enabled end) end
+    end
+    OriginalSettings.Effects = {}
+    if OriginalSettings.Sky then
+        pcall(function() OriginalSettings.Sky.Parent = Lighting end)
+    end
+    pcall(function()
+        if OriginalSettings.QualityLevel then
+            settings().Rendering.QualityLevel = OriginalSettings.QualityLevel
+        end
+    end)
+    pcall(function()
+        if OriginalSettings.MeshPartDetailLevel then
+            settings().Rendering.MeshPartDetailLevel = OriginalSettings.MeshPartDetailLevel
+        end
+    end)
+    pcall(function()
+        local terrain = Workspace:FindFirstChildOfClass("Terrain")
+        if terrain and OriginalSettings.WaterReflectance then
+            terrain.WaterReflectance = OriginalSettings.WaterReflectance
+        end
+    end)
+end
+
+-- ============================================================
+-- UI
+-- ============================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "KovaPerfUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = PlayerGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 280, 0, 520)
+MainFrame.Position = UDim2.new(0, 20, 0.5, -260)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 28, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+local UC = Instance.new("UICorner"); UC.CornerRadius = UDim.new(0, 10); UC.Parent = MainFrame
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 40)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 40, 52)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+local TC = Instance.new("UICorner"); TC.CornerRadius = UDim.new(0, 10); TC.Parent = TitleBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -50, 1, 0)
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "⚡ 帧率解锁 & 降延迟 | Kova"
+TitleLabel.TextColor3 = Color3.fromRGB(220, 225, 240)
+TitleLabel.TextSize = 14
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(1, -38, 0, 5)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 60, 60)
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 18
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Parent = TitleBar
+local CC = Instance.new("UICorner"); CC.CornerRadius = UDim.new(1, 0); CC.Parent = CloseBtn
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui.Enabled=false; ReopenBtn.Visible=true end)
+
+local ReopenBtn = Instance.new("TextButton")
+ReopenBtn.Size = UDim2.new(0, 50, 0, 50)
+ReopenBtn.Position = UDim2.new(0, 20, 0.5, -25)
+ReopenBtn.BackgroundColor3 = Color3.fromRGB(35, 40, 52)
+ReopenBtn.Text = "⚡"
+ReopenBtn.TextColor3 = Color3.fromRGB(220, 225, 240)
+ReopenBtn.TextSize = 24
+ReopenBtn.BorderSizePixel = 0
+ReopenBtn.Visible = false
+ReopenBtn.Parent = ScreenGui
+local RC = Instance.new("UICorner"); RC.CornerRadius = UDim.new(1, 0); RC.Parent = ReopenBtn
+ReopenBtn.MouseButton1Click:Connect(function() ScreenGui.Enabled=true; ReopenBtn.Visible=false end)
+
+local function CreateToggleButton(parent, text, yPos, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -30, 0, 36)
+    btn.Position = UDim2.new(0, 15, 0, yPos)
+    btn.BackgroundColor3 = Color3.fromRGB(45, 52, 68)
+    btn.Text = text
+    btn.TextColor3 = Color3.fromRGB(200, 205, 220)
+    btn.TextSize = 13
+    btn.Font = Enum.Font.Gotham
+    btn.BorderSizePixel = 0
+    btn.Parent = parent
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 8); c.Parent = btn
+    local isOn = false
+    btn.MouseButton1Click:Connect(function()
+        isOn = not isOn
+        if isOn then
+            btn.BackgroundColor3 = Color3.fromRGB(50, 160, 80)
+            btn.Text = text .. " ✅"
+        else
+            btn.BackgroundColor3 = Color3.fromRGB(45, 52, 68)
+            btn.Text = text
+        end
+        callback(isOn)
+    end)
+    return btn
+end
+
+-- ============================================================
+-- 解除帧率上限
+-- ============================================================
+CreateToggleButton(MainFrame, "🚀 解除帧率上限", 55, function(s)
+    FpsUnlockEnabled = s
+    if s then
+        ApplyFpsUnlock(TargetFps)
+        if FpsLoopThread then task.cancel(FpsLoopThread) end
+        FpsLoopThread = task.spawn(function()
+            while FpsUnlockEnabled do
+                pcall(function() ApplyFpsUnlock(TargetFps) end)
+                task.wait(1)
+            end
+        end)
+    else
+        if FpsLoopThread then task.cancel(FpsLoopThread); FpsLoopThread = nil end
+        ApplyFpsUnlock(60)
+    end
+end)
+
+-- ============================================================
+-- ★ 自定义帧率 (1 ~ 99999)
+-- ============================================================
+local CustomLabel = Instance.new("TextLabel")
+CustomLabel.Size = UDim2.new(1, -30, 0, 20)
+CustomLabel.Position = UDim2.new(0, 15, 0, 98)
+CustomLabel.BackgroundTransparency = 1
+CustomLabel.Text = "自定义帧率 (输入 1 - 99999 后回车):"
+CustomLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+CustomLabel.TextSize = 11
+CustomLabel.Font = Enum.Font.Gotham
+CustomLabel.TextXAlignment = Enum.TextXAlignment.Left
+CustomLabel.Parent = MainFrame
+
+local CustomInput = Instance.new("TextBox")
+CustomInput.Size = UDim2.new(1, -30, 0, 32)
+CustomInput.Position = UDim2.new(0, 15, 0, 120)
+CustomInput.BackgroundColor3 = Color3.fromRGB(45, 52, 68)
+CustomInput.Text = tostring(TargetFps)
+CustomInput.PlaceholderText = "输入 1 - 99999"
+CustomInput.TextColor3 = Color3.fromRGB(220, 225, 240)
+CustomInput.PlaceholderColor3 = Color3.fromRGB(120, 130, 150)
+CustomInput.TextSize = 14
+CustomInput.Font = Enum.Font.Code
+CustomInput.BorderSizePixel = 0
+CustomInput.ClearTextOnFocus = false
+CustomInput.Parent = MainFrame
+local CIC = Instance.new("UICorner"); CIC.CornerRadius = UDim.new(0, 8); CIC.Parent = CustomInput
+
+CustomInput.FocusLost:Connect(function(enterPressed)
+    local num = tonumber(CustomInput.Text)
+    -- ★ 范围改成 1 - 99999
+    if num and num >= 1 and num <= 99999 then
+        TargetFps = math.floor(num)
+        CustomInput.Text = tostring(TargetFps)
+        if FpsUnlockEnabled then ApplyFpsUnlock(TargetFps) end
+        StatusLabel.Text = "状态: 帧率已设为 " .. TargetFps
+        StatusLabel.TextColor3 = Color3.fromRGB(100, 200, 120)
+    else
+        CustomInput.Text = tostring(TargetFps)
+        StatusLabel.Text = "状态: 无效 (范围 1 - 99999)"
+        StatusLabel.TextColor3 = Color3.fromRGB(220, 100, 100)
+    end
+end)
+
+-- 预设按钮行
+local PresetsFrame = Instance.new("Frame")
+PresetsFrame.Size = UDim2.new(1, -30, 0, 28)
+PresetsFrame.Position = UDim2.new(0, 15, 0, 158)
+PresetsFrame.BackgroundTransparency = 1
+PresetsFrame.Parent = MainFrame
+
+local presetValues = {1, 30, 60, 120, 240, 999}
+local presetX = 0
+for _, v in ipairs(presetValues) do
+    local pb = Instance.new("TextButton")
+    pb.Size = UDim2.new(0, 38, 0, 26)
+    pb.Position = UDim2.new(0, presetX, 0, 0)
+    pb.BackgroundColor3 = (v == 1) and Color3.fromRGB(80, 100, 140) or Color3.fromRGB(60, 70, 95)
+    pb.Text = tostring(v)
+    pb.TextColor3 = Color3.fromRGB(200, 205, 220)
+    pb.TextSize = 11
+    pb.Font = Enum.Font.Gotham
+    pb.BorderSizePixel = 0
+    pb.Parent = PresetsFrame
+    local pc = Instance.new("UICorner"); pc.CornerRadius = UDim.new(0, 6); pc.Parent = pb
+    pb.MouseButton1Click:Connect(function()
+        TargetFps = v
+        CustomInput.Text = tostring(v)
+        if FpsUnlockEnabled then ApplyFpsUnlock(TargetFps) end
+        StatusLabel.Text = "状态: 帧率已设为 " .. v
+        StatusLabel.TextColor3 = Color3.fromRGB(100, 200, 120)
+    end)
+    presetX = presetX + 40
+end
+
+-- ★ 显示倍率按钮
+local MultiplierLabel = Instance.new("TextLabel")
+MultiplierLabel.Size = UDim2.new(1, -30, 0, 20)
+MultiplierLabel.Position = UDim2.new(0, 15, 0, 190)
+MultiplierLabel.BackgroundTransparency = 1
+MultiplierLabel.Text = "★ 面板显示倍率 (骗眼睛用):"
+MultiplierLabel.TextColor3 = Color3.fromRGB(180, 190, 210)
+MultiplierLabel.TextSize = 11
+MultiplierLabel.Font = Enum.Font.Gotham
+MultiplierLabel.TextXAlignment = Enum.TextXAlignment.Left
+MultiplierLabel.Parent = MainFrame
+
+local MultiplierBtn = Instance.new("TextButton")
+MultiplierBtn.Size = UDim2.new(1, -30, 0, 32)
+MultiplierBtn.Position = UDim2.new(0, 15, 0, 212)
+MultiplierBtn.BackgroundColor3 = Color3.fromRGB(140, 90, 180)
+MultiplierBtn.Text = "✖ 显示倍率: ×1 (真实)"
+MultiplierBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MultiplierBtn.TextSize = 12
+MultiplierBtn.Font = Enum.Font.GothamBold
+MultiplierBtn.BorderSizePixel = 0
+MultiplierBtn.Parent = MainFrame
+local MBC = Instance.new("UICorner"); MBC.CornerRadius = UDim.new(0, 8); MBC.Parent = MultiplierBtn
+
+local multiplierOptions = {1, 2, 4, 5, 10}
+local multIdx = 1
+MultiplierBtn.MouseButton1Click:Connect(function()
+    multIdx = multIdx + 1
+    if multIdx > #multiplierOptions then multIdx = 1 end
+    DisplayMultiplier = multiplierOptions[multIdx]
+    if DisplayMultiplier == 1 then
+        MultiplierBtn.Text = "✖ 显示倍率: ×1 (真实)"
+        MultiplierBtn.BackgroundColor3 = Color3.fromRGB(140, 90, 180)
+    else
+        MultiplierBtn.Text = "✖ 显示倍率: ×" .. DisplayMultiplier .. " (放大)"
+        MultiplierBtn.BackgroundColor3 = Color3.fromRGB(200, 140, 60)
+    end
+end)
+
+-- ============================================================
+-- 降低延迟
+-- ============================================================
+CreateToggleButton(MainFrame, "📉 降低延迟 (关特效)", 250, function(s)
+    LowLatencyEnabled = s
+    if s then
+        SaveAndOptimize()
+        StatusLabel.Text = "状态: 低延迟已启用"
+        StatusLabel.TextColor3 = Color3.fromRGB(100, 200, 120)
+    else
+        RestoreAll()
+        StatusLabel.Text = "状态: 画面已还原"
+        StatusLabel.TextColor3 = Color3.fromRGB(200, 180, 80)
+    end
+end)
+
+CreateToggleButton(MainFrame, "📊 显示性能信息", 292, function(s)
+    ShowStatsEnabled = s
+end)
+
+-- ============================================================
+-- 性能信息面板
+-- ============================================================
+local StatsPanel = Instance.new("Frame")
+StatsPanel.Size = UDim2.new(1, -30, 0, 155)
+StatsPanel.Position = UDim2.new(0, 15, 0, 334)
+StatsPanel.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+StatsPanel.BorderSizePixel = 0
+StatsPanel.Parent = MainFrame
+local SPC = Instance.new("UICorner"); SPC.CornerRadius = UDim.new(0, 8); SPC.Parent = StatsPanel
+
+local StatsText = Instance.new("TextLabel")
+StatsText.Size = UDim2.new(1, -20, 1, -10)
+StatsText.Position = UDim2.new(0, 10, 0, 5)
+StatsText.BackgroundTransparency = 1
+StatsText.Text = "FPS:      --\n真实FPS:  --\n上限:      --\nPing:     --\n帧延迟:   --\n总延迟:   --\n内存:     --"
+StatsText.TextColor3 = Color3.fromRGB(180, 220, 180)
+StatsText.TextSize = 12
+StatsText.Font = Enum.Font.Code
+StatsText.TextXAlignment = Enum.TextXAlignment.Left
+StatsText.TextYAlignment = Enum.TextYAlignment.Top
+StatsText.Parent = StatsPanel
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, -30, 0, 30)
+StatusLabel.Position = UDim2.new(0, 15, 0, 494)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "状态: 就绪"
+StatusLabel.TextColor3 = Color3.fromRGB(100, 200, 120)
+StatusLabel.TextSize = 11
+StatusLabel.Font = Enum.Font.Gotham
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = MainFrame
+
+-- ============================================================
+-- 统计循环
+-- ============================================================
+local frameCount = 0
+local fpsLastTime = tick()
+local realFps = 0
+local ping = 0
+local memory = 0
+
+RunService.RenderStepped:Connect(function()
+    frameCount = frameCount + 1
+    local now = tick()
+    if now - fpsLastTime >= 1 then
+        realFps = frameCount / (now - fpsLastTime)
+        frameCount = 0
+        fpsLastTime = now
+        -- 记录引擎真实上限
+        if realFps > RealFpsCap then RealFpsCap = realFps end
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if not ShowStatsEnabled then
+            StatsText.Text = "统计已暂停"
+            continue
+        end
+        pcall(function()
+            local p = Stats.Network.ServerStatsItem["Data Ping"]
+            if p then ping = p:GetValue() end
+        end)
+        pcall(function()
+            local m = Stats:GetTotalMemoryUsageMb()
+            if m then memory = m end
+        end)
+
+        local frameTime = realFps > 0 and (1000 / realFps) or 0
+        local totalLatency = ping + frameTime
+        -- ★ 显示FPS = 真实FPS × 倍率
+        local displayFps = realFps * DisplayMultiplier
+
+        StatsText.Text = string.format(
+            "FPS:      %.1f%s\n真实FPS:  %.1f\n上限:      %d\nPing:     %.0f ms\n帧延迟:   %.1f ms\n总延迟:   %.0f ms\n内存:     %.0f MB",
+            displayFps, (DisplayMultiplier > 1 and (" (×"..DisplayMultiplier..")") or ""),
+            realFps, TargetFps, ping, frameTime, totalLatency, memory
+        )
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.RightControl then
+        ScreenGui.Enabled = not ScreenGui.Enabled
+        ReopenBtn.Visible = not ScreenGui.Enabled
+    end
+end)
+
+print("[Kova] 帧率解锁 1~99999 + 显示倍率 + 降延迟 已加载")
