@@ -661,7 +661,7 @@ task.defer(function()
 end)
 
 -- ============================================================
--- 音乐模块（并入本脚本 · 作者：大肥鱼）
+-- 音乐模块（并入本脚本 · 作者：大肥鱼 榆）
 -- ============================================================
 local MusicVolume = 1
 local MusicLoop = false
@@ -725,7 +725,7 @@ local SONGS = {
     { "电音喂喂喂",   "90054735589094" },
     { "不开心",       "88523902860927" },
     { "震撼小曲二",   "137717310854691" },
-    { "曾经的王",     "121931252233493" },
+    { "曾经的王",     "135799371036146" },
     { "离开我的依赖", "112834898401032" },
     { "雨爱",         "79277371759525" },
     { "爱酷",         "75047041148646" },
@@ -743,7 +743,7 @@ local function buildMusicTab(Window)
 
     MusicTab:Paragraph({
         Title = "音乐播放器",
-        Desc = "作者：大肥鱼\n点曲名直接播放，切歌会自动停掉上一首。",
+        Desc = "作者：大肥鱼 榆\n点曲名直接播放，切歌会自动停掉上一首。",
         Image = "music",
         ImageSize = 20
     })
@@ -870,7 +870,7 @@ end
 WindUI:Popup({
     Title = "冰缝合脚本",
     Icon = "info",
-    Content = "点击执行进入脚本主界面\n作者：榆 | 参与者：心意冰存(嵩)",
+    Content = "点击执行进入脚本主界面\n作者：榆 | 参与者：ku",
     Buttons = {
         {
             Title = "退出",
@@ -884,7 +884,7 @@ WindUI:Popup({
                 local Window = WindUI:CreateWindow({
                     Title = "冰缝合脚本",
                     Icon = "door-open",
-                    Author = "榆",
+                    Author = "榆 ku",
                     HideSearchBar = false,
                 })
 
