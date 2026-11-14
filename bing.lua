@@ -1046,6 +1046,14 @@ WindUI:Popup({
                         loadExternalScript("Dat++服务器", "https://raw.githubusercontent.com/BigFatFish67/sinister-spooky-orb/refs/heads/main/Dex%2B%2B.lua")
                     end
                 })
+                ScriptTab:Button({
+                    Title = "▶ 加载 偷一个蛋",
+                    Desc = "Ying 偷一颗蛋源码 · yucifil/-",
+                    Icon = "download",
+                    Callback = function()
+                        loadExternalScript("偷一个蛋", "https://raw.githubusercontent.com/yucifil/-/main/Ying-%E5%81%B7%E4%B8%80%E9%A2%97%E8%9B%8B%E6%BA%90%E7%A0%81.lua")
+                    end
+                })
 
                 buildMusicTab(Window)
 
@@ -1066,7 +1074,6 @@ WindUI:Popup({
                     Value = "Dark",
                     Callback = function(selected)
                         if selected == "透明" then
-                            -- 开启透明窗口模式
                             EnhancedTransparency = true
                             pcall(function()
                                 Window:ToggleTransparency(true)
